@@ -30,6 +30,10 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
     }
 
     // **** ADD LIQUIDITY ****
+    //结合代码
+    // _addLiquidity 其实主要做了两件事情
+    // 1: 调用 v2-core合约的UniswapV2Factory的 create pair 去create pair
+    // 2: 给定的 amountADesired和amountBDesired来得到符合区间的AIn 和Bins
     function _addLiquidity(
         address tokenA,
         address tokenB,
@@ -39,18 +43,36 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
         uint amountBMin
     ) internal virtual returns (uint amountA, uint amountB) {
         // create the pair if it doesn't exist yet
+        //通过访问 v2-core 里面的Factory 的 getPair Map
+        // mapping(address=>mapping(address=>address))
+        // tokenA -> tokenB -> pair address
+        // tokenB -> tokenA -> paire address
         if (IUniswapV2Factory(factory).getPair(tokenA, tokenB) == address(0)) {
+            //using create2 to create pair
+            //使用 tokenA和TokenB做salt 
+            //先对tokenA和tokenB排序
+            //然后比较最小的一个是不是 address(0)就能排除2个token都是0的为题
             IUniswapV2Factory(factory).createPair(tokenA, tokenB);
         }
+
+        //获取pair的 2种代币的余额
         (uint reserveA, uint reserveB) = UniswapV2Library.getReserves(factory, tokenA, tokenB);
+        //第一次其实肯定是 reserveA ==0 & reserveB == 0
         if (reserveA == 0 && reserveB == 0) {
             (amountA, amountB) = (amountADesired, amountBDesired);
         } else {
+            //在第一次添加流动性后
+            //则需要计算能添加多少的amountA和amountB
             uint amountBOptimal = UniswapV2Library.quote(amountADesired, reserveA, reserveB);
+            //如果以tokenA 来计算最大的 tokenB的amountOut
+            //如果 此时 tokenB max out 是介于 amountBDesired和amountBMin，那么就是符合要求。
+            //也就是以A标准，获得的B amountout是符合区间的
             if (amountBOptimal <= amountBDesired) {
                 require(amountBOptimal >= amountBMin, 'UniswapV2Router: INSUFFICIENT_B_AMOUNT');
                 (amountA, amountB) = (amountADesired, amountBOptimal);
             } else {
+                // 如果以A标准获取的 tokenB的 max out大于我们想输入的b
+                //那么说明 tokenA 多了。所以改为以B为标准。来得到A
                 uint amountAOptimal = UniswapV2Library.quote(amountBDesired, reserveB, reserveA);
                 assert(amountAOptimal <= amountADesired);
                 require(amountAOptimal >= amountAMin, 'UniswapV2Router: INSUFFICIENT_A_AMOUNT');
@@ -68,12 +90,39 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
         address to,
         uint deadline
     ) external virtual override ensure(deadline) returns (uint amountA, uint amountB, uint liquidity) {
+        // _addLiquidity
         (amountA, amountB) = _addLiquidity(tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
+        //获得符合要求的amountA和amountB 后开始执行转账操作了
+        //先获取我们tokenA和tokenB的pair
+
         address pair = UniswapV2Library.pairFor(factory, tokenA, tokenB);
+        //计算pair的方法,也就是create2的标准写法
+        //address = 0xff + address + slat + createcodeash
+        (address t0,address t1) = UniswapV2Library.sortTokens(tokenA, tokenB);
+        address pairv1 = address(
+            uint(
+                keccak256(
+                    abi.encodePacked(
+                        hex'ff',
+                        factory,
+                        keccak256(abi.encodePacked(t0,t1)),
+                        hex'96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f' //
+                    )
+                )
+            )
+        );
+
+        //执行转账
+        //msg.sender == router合约
+        //所以必须在外部 进行approve
+        // tokenA.connect(msg.sender).approve(router,100)
+        // tokenB.connect(msg.sender).approve(router,100)
         TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
         TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
+        //最后调用 pair mint一个凭证
         liquidity = IUniswapV2Pair(pair).mint(to);
     }
+
     function addLiquidityETH(
         address token,
         uint amountTokenDesired,
@@ -90,12 +139,16 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
             amountTokenMin,
             amountETHMin
         );
+        //如果使用eth的话,内部还是会转为 WETH去做tokenA的
         address pair = UniswapV2Library.pairFor(factory, token, WETH);
+        //先把token转到pair合约
         TransferHelper.safeTransferFrom(token, msg.sender, pair, amountToken);
+        //然后把eth 换成weth 去做defi的交易代表,这是业界常用的，目前是用WETH9版本
         IWETH(WETH).deposit{value: amountETH}();
         assert(IWETH(WETH).transfer(pair, amountETH));
         liquidity = IUniswapV2Pair(pair).mint(to);
         // refund dust eth, if any
+        //退回多的eth代币,考虑的真好啊
         if (msg.value > amountETH) TransferHelper.safeTransferETH(msg.sender, msg.value - amountETH);
     }
 
@@ -117,6 +170,8 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
         require(amountA >= amountAMin, 'UniswapV2Router: INSUFFICIENT_A_AMOUNT');
         require(amountB >= amountBMin, 'UniswapV2Router: INSUFFICIENT_B_AMOUNT');
     }
+
+    
     function removeLiquidityETH(
         address token,
         uint liquidity,
